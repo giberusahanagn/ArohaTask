@@ -8,150 +8,201 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
+import com.aroha.csvFileReader.dto.MemberDTO;
 import com.aroha.csvFileReader.entity.Member;
 import com.aroha.csvFileReader.entity.MemberId;
 import com.aroha.csvFileReader.repository.CsvFileReaderRepository;
 import com.opencsv.CSVReader;
 import com.opencsv.CSVWriter;
 
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceContext;
+
 @Service
 public class CsvFileReaderServiceImpl {
 
-    @Autowired
-    private CsvFileReaderRepository csvFileReaderRepository;
+	@PersistenceContext
+	private EntityManager entityManager;
 
-    public String processCsv(MultipartFile file) throws Exception {
-    	
-    	long startTime = System.currentTimeMillis(); // Start time
-        Set<String> uniqueSet = new HashSet<>();
-        DateTimeFormatter[] formatters = {
-            DateTimeFormatter.ofPattern("d/M/yyyy"),
-            DateTimeFormatter.ofPattern("dd-MM-yyyy"),
-            DateTimeFormatter.ofPattern("dd/MM/yyyy")
-        };
+	@Autowired
+	private CsvFileReaderRepository csvFileReaderRepository;
 
-        File failedFile = new File("FailedRecords.csv");
-        try (CSVReader reader = new CSVReader(new InputStreamReader(file.getInputStream()));
-             CSVWriter failedWriter = new CSVWriter(new FileWriter(failedFile))) {
+	@Transactional
+	public String readCsv(MultipartFile file) throws Exception {
+	    long startTime = System.currentTimeMillis();
+	    Set<String> uniqueCompositeKeys = new HashSet<>();
 
-            String[] header = reader.readNext();
-            if (header == null || header.length < 14) {
-                throw new RuntimeException("Invalid or missing CSV header");
-            }
+	    DateTimeFormatter[] dateFormats = {
+	        DateTimeFormatter.ofPattern("d/M/yyyy"),
+	        DateTimeFormatter.ofPattern("dd-MM-yyyy"),
+	        DateTimeFormatter.ofPattern("dd/MM/yyyy")
+	    };
 
-            String[] invalidHeader = Arrays.copyOf(header, header.length + 1);
-            invalidHeader[header.length] = "Error";
-            failedWriter.writeNext(invalidHeader);
+	    File failedFile = new File("FailedRecords.csv");
 
-            String[] row;
-            int valid = 0, invalid = 0;
+	    int validCount = 0;
+	    int invalidCount = 0;
+	    int currentRowIndex = 1;
+	    int batchSize = 100;
+	    int batchCount = 0;
+	    int batchNumber = 1;
 
-            while ((row = reader.readNext()) != null) {
-                boolean isValid = true;
-                StringBuilder error = new StringBuilder();
+	    try (
+	        CSVReader reader = new CSVReader(new InputStreamReader(file.getInputStream()));
+	        CSVWriter failedWriter = new CSVWriter(new FileWriter(failedFile))
+	    ) {
+	        System.out.println("Reading CSV file...");
 
-                // Skip if row length is insufficient
-                if (row.length < 14) {
-                    invalid++;
-                    continue;
-                }
+	        String[] header = reader.readNext();
+	        if (header == null || header.length < 14) {
+	            throw new RuntimeException("Invalid or missing CSV header");
+	        }
 
-                // Trim all fields
-                for (int i = 0; i < row.length; i++) {
-                    if (row[i] != null) row[i] = row[i].trim();
-                }
+	        String[] invalidHeader = Arrays.copyOf(header, header.length + 1);
+	        invalidHeader[header.length] = "Error";
+	        failedWriter.writeNext(invalidHeader);
 
-                // Mandatory field checks
-                if (row[1].isEmpty() || row[2].isEmpty() || row[3].isEmpty() ||
-                    row[4].isEmpty() || row[11].isEmpty()) {
-                    isValid = false;
-                    error.append("Missing mandatory field; ");
-                }
+	        String[] row;
+	        while ((row = reader.readNext()) != null) {
+	            System.out.println("Processing row: " + currentRowIndex++);
+	            StringBuilder errorMessage = new StringBuilder();
 
-                // Address cleanup
-                row[7] = row[7].replaceAll("[^a-zA-Z0-9 ]", "");
-                row[8] = row[8].replaceAll("[^a-zA-Z0-9 ]", "");
+	            // Trim all fields
+	            for (int i = 0; i < row.length; i++) {
+	                if (row[i] != null) row[i] = row[i].trim();
+	            }
 
-                // Mobile sanitization and validation
-                row[11] = row[11].replaceAll("[^0-9]", "");
-                if (!row[11].matches("^[789]\\d{9}$")) {
-                    isValid = false;
-                    error.append("Invalid mobile; ");
-                }
+	            // Basic validation
+	            if (row.length < 14) {
+	                errorMessage.append("Incomplete row");
+	                writeInvalidRow(failedWriter, row, errorMessage.toString());
+	                invalidCount++;
+	                continue;
+	            }
 
-                // DOB parsing and validation
-                LocalDate dob = null;
-                boolean dobValid = false;
-                for (DateTimeFormatter fmt : formatters) {
-                    try {
-                        dob = LocalDate.parse(row[3], fmt);
-                        dobValid = true;
-                        break;
-                    } catch (Exception ignored) {}
-                }
-                if (!dobValid || dob.isAfter(LocalDate.now()) ||
-                    ChronoUnit.YEARS.between(dob, LocalDate.now()) > 100) {
-                    isValid = false;
-                    error.append("Invalid DOB; ");
-                }
+	            if (row[1].isEmpty() || row[2].isEmpty() || row[3].isEmpty() || row[4].isEmpty() || row[11].isEmpty()) {
+	                errorMessage.append("Missing mandatory field");
+	                writeInvalidRow(failedWriter, row, errorMessage.toString());
+	                invalidCount++;
+	                continue;
+	            }
 
-                // Education field
-                if (row[5].isEmpty()) {
-                    isValid = false;
-                    error.append("Empty education; ");
-                }
+	            // Format sanitization
+	            row[7] = row[7].replaceAll("[^a-zA-Z0-9 ]", "");
+	            row[8] = row[8].replaceAll("[^a-zA-Z0-9 ]", "");
+	            row[11] = row[11].replaceAll("[^0-9]", "");
 
-                // Salary parsing
-                try {
-                    Double.parseDouble(row[13]);
-                } catch (NumberFormatException e) {
-                    isValid = false;
-                    error.append("Invalid salary; ");
-                }
+	            if (!row[11].matches("^[789]\\d{9}$")) {
+	                errorMessage.append("Invalid mobile");
+	                writeInvalidRow(failedWriter, row, errorMessage.toString());
+	                invalidCount++;
+	                continue;
+	            }
 
-                // Composite uniqueness check
-                String key = row[1] + "|" + row[2] + "|" + row[4] + "|" + dob;
-                if (!uniqueSet.add(key)) {
-                    isValid = false;
-                    error.append("Duplicate record; ");
-                }
+	            // Parse DOB
+	            LocalDate dob = null;
+	            for (DateTimeFormatter formatter : dateFormats) {
+	                try {
+	                    dob = LocalDate.parse(row[3], formatter);
+	                    break;
+	                } catch (Exception ignored) {}
+	            }
 
-                if (isValid) {
-                    Member member = new Member();
-                    MemberId id = new MemberId();
-                    id.setFirstName(row[1]);
-                    id.setLastName(row[2]);
-                    id.setGender(row[4]);
-                    id.setDateOfBirth(dob);
+	            if (dob == null || dob.isAfter(LocalDate.now()) || ChronoUnit.YEARS.between(dob, LocalDate.now()) > 100) {
+	                errorMessage.append("Invalid DOB");
+	                writeInvalidRow(failedWriter, row, errorMessage.toString());
+	                invalidCount++;
+	                continue;
+	            }
 
-                    member.setId(id);
-                    member.setEmail(row[0]);
-                    member.setAddress1(row[7]);
-                    member.setAddress2(row[8]);
-                    member.setCity(row[9]);
-                    member.setState(row[10]);
-                    member.setCountry(row[6]);
-                    member.setMobile(row[11]);
+	            // Composite key check
+	            String compositeKey = row[1] + "|" + row[2] + "|" + row[4] + "|" + dob;
+	            if (!uniqueCompositeKeys.add(compositeKey)) {
+	                errorMessage.append("Duplicate in file");
+	                writeInvalidRow(failedWriter, row, errorMessage.toString());
+	                invalidCount++;
+	                continue;
+	            }
 
-                    csvFileReaderRepository.save(member);
-                    valid++;
-                } else {
-                    String[] rowWithError = Arrays.copyOf(row, row.length + 1);
-                    rowWithError[row.length] = error.toString();
-                    failedWriter.writeNext(rowWithError);
-                    invalid++;
-                }
-            }
-            long endTime = System.currentTimeMillis(); // End time
-            long timeTaken = endTime - startTime;
+	            // Construct entity
+	            Member member = new Member();
+	            MemberId memberId = new MemberId();
+	            memberId.setFirstName(row[1]);
+	            memberId.setLastName(row[2]);
+	            memberId.setGender(row[4]);
+	            memberId.setDateOfBirth(dob);
 
-            return "Valid: " + valid + ", Invalid: " + invalid +
-                   " (see FailedRecords.csv), Time Taken: " + timeTaken + " ms";        }
-    }
+	            member.setMemberId(memberId);
+	            member.setRecord(row[0]);
+	            member.setEmail(row[12]);
+	            member.setCompany(row[6]);
+	            member.setAddress1(row[7]);
+	            member.setAddress2(row[8]);
+	            member.setCity(row[9]);
+	            member.setState(row[10]);
+	            member.setMobile(row[11]);
+	            member.setSalary(row[13]);
+
+	            entityManager.persist(member);
+	            validCount++;
+	            batchCount++;
+
+	            if (batchCount % batchSize == 0) {
+	                entityManager.flush();
+	                entityManager.clear();
+	                System.out.println("[BATCH COMMIT #" + batchNumber + "] Flushed " + batchSize + " records");
+	                batchNumber++;
+	            }
+	        }
+	    }
+
+	    // Final flush for remaining records
+	    int remaining = batchCount % batchSize;
+	    if (remaining > 0) {
+	        entityManager.flush();
+	        entityManager.clear();
+	        System.out.println("[FINAL BATCH COMMIT #" + batchNumber + "] Flushed " + remaining + " records");
+	    }
+
+	    long timeTaken = System.currentTimeMillis() - startTime;
+
+	    System.out.println("CSV Processing Completed.");
+	    System.out.println("Valid Records: " + validCount);
+	    System.out.println("Invalid Records: " + invalidCount);
+	    System.out.println("Time Taken: " + timeTaken + " ms");
+	    System.out.println("Batch count (persisted records): " + batchCount);
+
+	    return "Valid: " + validCount + ", Invalid: " + invalidCount + " (see FailedRecords.csv), Time Taken: "
+	            + timeTaken + " ms";
+	}
+
+	private void writeInvalidRow(CSVWriter writer, String[] row, String errorMessage) {
+	    String[] rowWithError = Arrays.copyOf(row, row.length + 1);
+	    rowWithError[row.length] = errorMessage;
+	    writer.writeNext(rowWithError);
+	}
+
+	public List<MemberDTO> getByFirstNameAndLastName(String firstName, String lastName) {
+		List<MemberDTO> rows = csvFileReaderRepository.findByFirstAndLastName(firstName, lastName);
+
+		return rows;
+	}
+	public List<MemberDTO> getDobOfRange(String startDate, String endDate) {
+		List<MemberDTO> rows = csvFileReaderRepository.findByDobBetween(startDate, endDate);
+		return rows;
+	}
+
+	public List<MemberDTO> getBySalary() {
+		List<MemberDTO> rows = csvFileReaderRepository.findBySalary();
+		return rows;
+	}
+
 }
