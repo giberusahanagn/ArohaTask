@@ -1,6 +1,5 @@
 package com.aroha.csvFileReader.repository;
 
-import java.time.LocalDate;
 import java.util.List;
 
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -11,6 +10,8 @@ import org.springframework.stereotype.Repository;
 import com.aroha.csvFileReader.dto.MemberDTO;
 import com.aroha.csvFileReader.entity.Member;
 import com.aroha.csvFileReader.entity.MemberId;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 @Repository
 public interface CsvFileReaderRepository extends JpaRepository<Member, MemberId> {
@@ -44,5 +45,11 @@ public interface CsvFileReaderRepository extends JpaRepository<Member, MemberId>
 				    FROM member
 			WHERE salary >20000""", nativeQuery = true)
 	List<MemberDTO> findBySalary();
+
+	
+//	@Query("SELECT m FROM Member m WHERE LOWER(m.memberId.firstName) LIKE LOWER(CONCAT('%', :firstName, '%'))")
+//	List<Member> searchByFirstName(@Param("firstName") String firstName);
+
+	Page<Member> findByMemberIdFirstNameIgnoreCase(String firstName, Pageable pageable);
 
 }
